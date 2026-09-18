@@ -3,16 +3,16 @@ Rhododendron — GeoThinkAI MoE architecture (user-facing release)
 ================================================================
 One file, four presets, any sequence length. Pick a size, load, generate.
 
-    from rhododendron import Rhododendron
+    from engine import Rhododendron
     model = Rhododendron.from_preset("small")          # ~0.6B, runs on a laptop
     model = Rhododendron.from_pretrained("./hf_out")   # load trained weights
     ids = model.generate(prompt_ids, max_new=100)      # any seq length works
 
 CLI:
-    python model.py                                # list all presets + param counts
-    python model.py --preset micro --test          # CPU forward/backward self-test
-    python model.py --preset micro --generate "Hi" # demo gen (byte tokenizer)
-    python model.py --count                        # count params (meta device)
+    python engine.py                                # list all presets + param counts
+    python engine.py --preset micro --test          # CPU forward/backward self-test
+    python engine.py --preset micro --generate "Hi" # demo gen (byte tokenizer)
+    python engine.py --count                        # count params (meta device)
 
 Plumbing: every component is registry+config driven; load_growth() upgrades
 a trained checkpoint into a re-plumbed model without losing abilities.
@@ -142,7 +142,9 @@ class TopkAux(_RouterBase):
 
 @register("router")
 class AuxFree(_RouterBase):
-    """Bias-adjusted top-k, NO aux loss; bias tracked from running load stats."""
+    """Bias-adjusted top-k, NO aux loss; bias tracked from running load stats.
+    update_bias() is called periodically (model.update_routers()) to nudge
+    expert biases toward equal load, keeping gradients free of aux-loss noise."""
     def __init__(s, c):
         super().__init__(c)
         s.register_buffer("bias", torch.zeros(c.n_experts), persistent=True)
@@ -153,7 +155,8 @@ class AuxFree(_RouterBase):
         vals, idx = p.topk(s.c.top_k, dim=-1)
         vals = vals / vals.sum(-1, keepdim=True).clamp_min(1e-9)
         with torch.no_grad():
-            s.freq_acc += F.one_hot(idx, s.c.n_experts).float().sum((1, 2)) / idx[0].numel(); s.n_seen += 1
+            # per-expert mean routing frequency across batch+seq+top_k slots [E]
+            s.freq_acc += F.one_hot(idx, s.c.n_experts).float().mean(dim=(0, 1, 2)); s.n_seen += 1
         return vals, idx, x.new_zeros(())
     def update_bias(s, rate=None):
         if s.n_seen == 0: return
